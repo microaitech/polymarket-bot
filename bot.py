@@ -17,13 +17,9 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
 PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
 TRACKED_ADDRESS = os.getenv("TRACKED_ADDRESS", "").lower()
-COPY_PERCENTAGE = float(os.getenv("COPY_PERCENTAGE", "50"))
-MAX_BET_USDC    = float(os.getenv("MAX_BET_USDC", "10"))
 POLY_API_KEY    = os.getenv("POLY_API_KEY")
 POLY_SECRET     = os.getenv("POLY_SECRET")
 POLY_PASSPHRASE = os.getenv("POLY_PASSPHRASE")
-STOP_LOSS_PCT   = 20.0
-TAKE_PROFIT_PCT = 70.0
 
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
 
@@ -38,16 +34,11 @@ except Exception as e:
 bot_state = {
     "running": False,
     "tracked": TRACKED_ADDRESS,
-    "copy_pct": COPY_PERCENTAGE,
-    "max_bet": MAX_BET_USDC,
     "seen_trades": set(),
     "chat_id": None,
     "total_copied": 0,
-    "open_positions": {},
 }
 
-def calculate_copy_amount(original):
-    return 7.0
 def execute_copy_trade(trade):
     try:
         trade_id = trade.get("id", "") or trade.get("transactionHash", "")
@@ -55,35 +46,26 @@ def execute_copy_trade(trade):
             return False, ""
         bot_state["seen_trades"].add(trade_id)
         outcome = trade.get("side", "BUY").upper()
-        original_amount = float(trade.get("size", 0))
         price = float(trade.get("price", 0))
         token_id = trade.get("asset_id") or trade.get("tokenId", "")
-        if original_amount < 1:
-            return False, ""
-        copy_amount = calculate_copy_amount(original_amount)
-        if copy_amount < 1:
-            return False, ""
-        if clob_client and token_id:
+        if not token_id:
+            return False, f"⚠️ Token ID yok: {str(trade)[:200]}"
+        if clob_client:
             try:
                 from py_clob_client.clob_types import CreateOrderOptions, OrderType
                 clob_client.create_and_post_order(CreateOrderOptions(
-                    token_id=token_id, price=price, size=copy_amount,
+                    token_id=token_id, price=price, size=7.0,
                     side=outcome, order_type=OrderType.GTC
                 ))
                 bot_state["total_copied"] += 1
-                if outcome == "BUY":
-                    bot_state["open_positions"][token_id] = {
-                        "size": copy_amount, "entry_price": price
-                    }
                 return True, (
                     f"✅ <b>İŞLEM KOPYALANDI</b>\n"
                     f"{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'} @ ${price:.4f}\n"
-                    f"💵 ${copy_amount:.2f} USDC\n"
-                    f"🛡 Stop: %{STOP_LOSS_PCT} | 🎯 Kar: %{TAKE_PROFIT_PCT}"
+                    f"💵 $7.00 USDC"
                 )
             except Exception as e:
                 return False, f"⚠️ İşlem hatası: {e}"
-        return False, ""
+        return False, "❌ API bağlı değil"
     except Exception as e:
         return False, f"Hata: {e}"
 
@@ -106,15 +88,13 @@ async def polling_loop(app):
                 created = trade.get("createdAt", 0)
                 if isinstance(created, (int, float)) and created < start_time:
                     continue
-                    if bot_state["chat_id"]:
-    await app.bot.send_message(
-        chat_id=bot_state["chat_id"],
-        text=f"🔍 Trade görüldü:\n{str(trade)[:500]}",
-        parse_mode=None
-    )
-
+                if bot_state["chat_id"]:
+                    await app.bot.send_message(
+                        chat_id=bot_state["chat_id"],
+                        text=f"🔍 Yeni trade:\n{str(trade)[:400]}"
+                    )
                 success, message = execute_copy_trade(trade)
-                if success and message and bot_state["chat_id"]:
+                if message and bot_state["chat_id"]:
                     await app.bot.send_message(
                         chat_id=bot_state["chat_id"],
                         text=message,
@@ -123,56 +103,18 @@ async def polling_loop(app):
         except Exception as e:
             logger.error(f"Polling hatası: {e}")
 
-async def stop_loss_loop(app):
-    while True:
-        await asyncio.sleep(60)
-        if not bot_state["running"] or not bot_state["open_positions"]:
-            continue
-        for token_id, pos in list(bot_state["open_positions"].items()):
-            try:
-                r = requests.get(f"https://clob.polymarket.com/prices?token_id={token_id}", timeout=8)
-                current_price = float(r.json().get("price", 0))
-                if current_price <= 0:
-                    continue
-                entry = pos["entry_price"]
-                pnl_pct = ((current_price - entry) / entry) * 100
-                reason = None
-                if pnl_pct <= -STOP_LOSS_PCT:
-                    reason = "STOP_LOSS"
-                elif pnl_pct >= TAKE_PROFIT_PCT:
-                    reason = "TAKE_PROFIT"
-                if reason and clob_client:
-                    from py_clob_client.clob_types import CreateOrderOptions, OrderType
-                    clob_client.create_and_post_order(CreateOrderOptions(
-                        token_id=token_id, price=current_price,
-                        size=pos["size"], side="SELL", order_type=OrderType.GTC
-                    ))
-                    del bot_state["open_positions"][token_id]
-                    emoji = "🛑" if reason == "STOP_LOSS" else "🎯"
-                    msg = (
-                        f"{emoji} <b>{'STOP LOSS' if reason == 'STOP_LOSS' else 'KAR HEDEFİ'}</b>\n"
-                        f"Kapatıldı @ ${current_price:.4f}\n"
-                        f"PnL: {'🔴' if pnl_pct < 0 else '🟢'} %{pnl_pct:.1f}"
-                    )
-                    if bot_state["chat_id"]:
-                        await app.bot.send_message(chat_id=bot_state["chat_id"], text=msg, parse_mode="HTML")
-            except Exception as e:
-                logger.error(f"Stop loss hatası: {e}")
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_state["chat_id"] = update.effective_chat.id
     keyboard = [
         [InlineKeyboardButton("▶️ Başlat", callback_data="start_bot"),
          InlineKeyboardButton("⏹ Durdur", callback_data="stop_bot")],
-        [InlineKeyboardButton("📊 Durum", callback_data="status"),
-         InlineKeyboardButton("💼 Pozisyon", callback_data="positions")],
+        [InlineKeyboardButton("📊 Durum", callback_data="status")],
     ]
     clob_status = "✅ Bağlı" if clob_client else "❌ Bağlanamadı"
     await update.message.reply_text(
         f"⚡️ *Polymarket Copy Trade Bot*\n\n"
         f"İzlenen: `{bot_state['tracked'][:10]}...`\n"
-        f"Kopya: %{bot_state['copy_pct']} | Max: ${bot_state['max_bet']} USDC\n"
-        f"🛡 Stop: %{STOP_LOSS_PCT} | 🎯 Kar: %{TAKE_PROFIT_PCT}\n"
+        f"Sabit işlem: $7.00 USDC\n"
         f"API: {clob_status}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -184,7 +126,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_state["chat_id"] = update.effective_chat.id
     if query.data == "start_bot":
         bot_state["running"] = True
-        await query.edit_message_text("▶️ Bot başlatıldı! Her 5 saniyede kontrol ediliyor...")
+        await query.edit_message_text("▶️ Bot başlatıldı! Her 3 saniyede kontrol ediliyor...")
     elif query.data == "stop_bot":
         bot_state["running"] = False
         await query.edit_message_text("⏹ Bot durduruldu.")
@@ -194,23 +136,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 *Durum*\n\n"
             f"Bot: {'🟢 Çalışıyor' if bot_state['running'] else '🔴 Durdu'}\n"
             f"API: {clob_status}\n"
-            f"Kopyalanan: {bot_state['total_copied']}\n"
-            f"Açık pozisyon: {len(bot_state['open_positions'])}\n"
-            f"🛡 Stop: %{STOP_LOSS_PCT} | 🎯 Kar: %{TAKE_PROFIT_PCT}",
+            f"Kopyalanan: {bot_state['total_copied']}",
             parse_mode="Markdown"
         )
-    elif query.data == "positions":
-        if not bot_state["open_positions"]:
-            await query.edit_message_text("📭 Açık pozisyon yok.")
-            return
-        text = "💼 *Açık Pozisyonlar*\n\n"
-        for tid, pos in list(bot_state["open_positions"].items())[:5]:
-            text += f"• {tid[:10]}... @ ${pos['entry_price']:.4f} | ${pos['size']:.2f}\n"
-        await query.edit_message_text(text, parse_mode="Markdown")
 
 async def post_init(app):
     asyncio.create_task(polling_loop(app))
-    asyncio.create_task(stop_loss_loop(app))
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -218,6 +149,5 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.run_polling(drop_pending_updates=True)
-
 if __name__ == "__main__":
     main()
