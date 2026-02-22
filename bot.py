@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, BUY, SELL
+from py_clob_client.clob_types import ApiCreds, MarketOrderArgs
 
 load_dotenv()
 
@@ -50,7 +50,7 @@ def execute_copy_trade(trade):
             return False, "⚠️ Token ID yok"
         if clob_client:
             try:
-                side = BUY if outcome == "BUY" else SELL
+                side = "BUY" if outcome == "BUY" else "SELL"
                 order = clob_client.create_market_order(MarketOrderArgs(
                     token_id=token_id,
                     amount=7.0,
