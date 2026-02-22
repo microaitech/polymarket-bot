@@ -51,11 +51,14 @@ def execute_copy_trade(trade):
             return False, "⚠️ Token ID yok"
         if clob_client:
             try:
-                from py_clob_client.clob_types import CreateOrderOptions, OrderType
-                clob_client.create_and_post_order(CreateOrderOptions(
-    tokenID=token_id, price=price, size=7.0,
-    side=outcome, order_type=OrderType.GTC
-))
+                order_args = {
+    "token_id": token_id,
+    "price": price,
+    "size": 7.0,
+    "side": outcome,
+}
+resp = clob_client.create_market_order(order_args)
+
 
                 bot_state["total_copied"] += 1
                 return True, (
