@@ -1,8 +1,5 @@
 python-telegram-bot==20.7
 requests
-web3
 python-dotenv
-websockets
 py-clob-client==0.17.0
-py-clob-client
 eip712-structs
