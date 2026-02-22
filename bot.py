@@ -6,6 +6,8 @@ import time
 import websockets
 import requests
 from dotenv import load_dotenv
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
