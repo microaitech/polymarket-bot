@@ -53,9 +53,10 @@ def execute_copy_trade(trade):
             try:
                 from py_clob_client.clob_types import CreateOrderOptions, OrderType
                 clob_client.create_and_post_order(CreateOrderOptions(
-                    token_id=token_id, price=price, size=7.0,
-                    side=outcome, order_type=OrderType.GTC
-                ))
+    tokenID=token_id, price=price, size=7.0,
+    side=outcome, order_type=OrderType.GTC
+))
+
                 bot_state["total_copied"] += 1
                 return True, (
                     f"✅ <b>İŞLEM KOPYALANDI</b>\n"
