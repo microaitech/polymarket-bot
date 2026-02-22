@@ -46,7 +46,7 @@ def get_auth_headers(method, path, body=""):
         "Content-Type": "application/json",
     }
 
-def place_market_order(token_id, side, amount):
+path = "/orders"
     try:
         path = "/order"
         body = json.dumps({
