@@ -91,7 +91,7 @@ async def polling_loop(app):
     last_seen = set()
     start_time = time.time()
     while True:
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         if not bot_state["running"]:
             continue
         try:
