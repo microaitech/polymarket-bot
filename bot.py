@@ -2,12 +2,13 @@ import os
 import asyncio
 import logging
 import time
+import hmac
+import hashlib
+import json
 import requests
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, MarketOrderArgs
 
 load_dotenv()
 
@@ -15,19 +16,11 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
-PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
 TRACKED_ADDRESS = os.getenv("TRACKED_ADDRESS", "").lower()
 POLY_API_KEY    = os.getenv("POLY_API_KEY")
 POLY_SECRET     = os.getenv("POLY_SECRET")
 POLY_PASSPHRASE = os.getenv("POLY_PASSPHRASE")
-
-try:
-    creds = ApiCreds(api_key=POLY_API_KEY, api_secret=POLY_SECRET, api_passphrase=POLY_PASSPHRASE)
-    clob_client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_id=137, creds=creds)
-    logger.info("CLOB client hazır")
-except Exception as e:
-    clob_client = None
-    logger.error(f"CLOB client hatası: {e}")
+PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
 
 bot_state = {
     "running": False,
@@ -36,6 +29,42 @@ bot_state = {
     "chat_id": None,
     "total_copied": 0,
 }
+
+def get_auth_headers(method, path, body=""):
+    timestamp = str(int(time.time()))
+    message = timestamp + method + path + body
+    signature = hmac.new(
+        POLY_SECRET.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    return {
+        "POLY-API-KEY": POLY_API_KEY,
+        "POLY-SIGNATURE": signature,
+        "POLY-TIMESTAMP": timestamp,
+        "POLY-PASSPHRASE": POLY_PASSPHRASE,
+        "Content-Type": "application/json",
+    }
+
+def place_market_order(token_id, side, amount):
+    try:
+        path = "/order"
+        body = json.dumps({
+            "tokenID": token_id,
+            "side": side,
+            "type": "MARKET",
+            "amount": str(amount),
+        })
+        headers = get_auth_headers("POST", path, body)
+        r = requests.post(
+            f"https://clob.polymarket.com{path}",
+            headers=headers,
+            data=body,
+            timeout=10
+        )
+        return r.status_code == 200, r.json()
+    except Exception as e:
+        return False, str(e)
 
 def execute_copy_trade(trade):
     try:
@@ -46,27 +75,20 @@ def execute_copy_trade(trade):
         outcome = trade.get("side", "BUY").upper()
         token_id = trade.get("asset", "")
         title = trade.get("title", "")[:40]
+        price = trade.get("price", 0)
         if not token_id:
             return False, "⚠️ Token ID yok"
-        if clob_client:
-            try:
-                side = "BUY" if outcome == "BUY" else "SELL"
-                order = clob_client.create_market_order(MarketOrderArgs(
-                    token_id=token_id,
-                    amount=7.0,
-                    side=side,
-                ))
-                resp = clob_client.post_order(order)
-                bot_state["total_copied"] += 1
-                return True, (
-                    f"✅ <b>İŞLEM KOPYALANDI</b>\n"
-                    f"{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'}\n"
-                    f"💵 $7.00 USDC\n"
-                    f"📊 {title}"
-                )
-            except Exception as e:
-                return False, f"⚠️ İşlem hatası: {e}"
-        return False, "❌ API bağlı değil"
+        success, resp = place_market_order(token_id, outcome, 7.0)
+        if success:
+            bot_state["total_copied"] += 1
+            return True, (
+                f"✅ <b>İŞLEM KOPYALANDI</b>\n"
+                f"{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'} @ {price}\n"
+                f"💵 $7.00 USDC\n"
+                f"📊 {title}"
+            )
+        else:
+            return False, f"⚠️ Hata: {str(resp)[:100]}"
     except Exception as e:
         return False, f"Hata: {e}"
 
@@ -94,7 +116,7 @@ async def polling_loop(app):
                 if bot_state["chat_id"]:
                     await app.bot.send_message(
                         chat_id=bot_state["chat_id"],
-                        text=f"🔍 Yeni trade: {trade.get('title', '')} | {trade.get('side', '')} @ {trade.get('price', '')}"
+                        text=f"🔍 {trade.get('title','')} | {trade.get('side','')} @ {trade.get('price','')}"
                     )
                 success, message = execute_copy_trade(trade)
                 if message and bot_state["chat_id"]:
@@ -113,12 +135,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("⏹ Durdur", callback_data="stop_bot")],
         [InlineKeyboardButton("📊 Durum", callback_data="status")],
     ]
-    clob_status = "✅ Bağlı" if clob_client else "❌ Bağlanamadı"
     await update.message.reply_text(
         f"⚡️ *Polymarket Copy Trade Bot*\n\n"
         f"İzlenen: `{bot_state['tracked'][:10]}...`\n"
-        f"Sabit işlem: $7.00 USDC\n"
-        f"API: {clob_status}",
+        f"Sabit işlem: $7.00 USDC",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -134,11 +154,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_state["running"] = False
         await query.edit_message_text("⏹ Bot durduruldu.")
     elif query.data == "status":
-        clob_status = "✅ Aktif" if clob_client else "❌ Bağlanamadı"
         await query.edit_message_text(
             f"📊 *Durum*\n\n"
             f"Bot: {'🟢 Çalışıyor' if bot_state['running'] else '🔴 Durdu'}\n"
-            f"API: {clob_status}\n"
             f"Kopyalanan: {bot_state['total_copied']}",
             parse_mode="Markdown"
         )
