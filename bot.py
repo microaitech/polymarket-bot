@@ -6,10 +6,10 @@ import time
 import websockets
 import requests
 from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds
 
 load_dotenv()
 
@@ -17,24 +17,26 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
 TRACKED_ADDRESS = os.getenv("TRACKED_ADDRESS", "").lower()
 COPY_PERCENTAGE = float(os.getenv("COPY_PERCENTAGE", "50"))
 MAX_BET_USDC    = float(os.getenv("MAX_BET_USDC", "10"))
+POLY_API_KEY    = os.getenv("POLY_API_KEY")
+POLY_SECRET     = os.getenv("POLY_SECRET")
+POLY_PASSPHRASE = os.getenv("POLY_PASSPHRASE")
 
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
 POLYMARKET_WS_URL    = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 
-bot_state = {
-    "running": False,
-    "tracked": TRACKED_ADDRESS,
-    "copy_pct": COPY_PERCENTAGE,
-    "max_bet": MAX_BET_USDC,
-    "seen_trades": set(),
-    "chat_id": None,
-    "total_copied": 0,
-    "ws_connected": False,
-    "ws_reconnects": 0,
-}
+try:
+    creds = ApiCreds(api_key=POLY_API_KEY, api_secret=POLY_SECRET, api_passphrase=POLY_PASSPHRASE)
+    clob_client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_id=137, creds=creds)
+    logger.info("CLOB client hazır")
+except Exception as e:
+    clob_client = None
+    logger.error(f"CLOB client hatası: {e}")
+
+bot_state = {"running": False, "tracked": TRACKED_ADDRESS, "copy_pct": COPY_PERCENTAGE, "max_bet": MAX_BET_USDC, "seen_trades": set(), "chat_id": None, "total_copied": 0, "ws_connected": False, "ws_reconnects": 0}
 
 def get_trader_positions(address):
     try:
@@ -55,15 +57,23 @@ def execute_copy_trade(trade):
         outcome = trade.get("side", "BUY").upper()
         original_amount = float(trade.get("size", 0))
         price = float(trade.get("price", 0))
+        token_id = trade.get("asset_id") or trade.get("tokenId", "")
         if original_amount < 1:
             return False, "Miktar çok küçük"
         copy_amount = calculate_copy_amount(original_amount)
         if copy_amount < 1:
             return False, f"Miktar çok küçük: ${copy_amount:.2f}"
-        bot_state["total_copied"] += 1
-        return True, (f"⚡️ <b>YENİ KOPYA</b>\n"
-                     f"{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'} @ ${price:.4f}\n"
-                     f"💵 ${copy_amount:.2f} USDC")
+        if clob_client and token_id:
+            try:
+                from py_clob_client.clob_types import CreateOrderOptions, OrderType
+                order = clob_client.create_and_post_order(CreateOrderOptions(token_id=token_id, price=price, size=copy_amount, side=outcome, order_type=OrderType.GTC))
+                bot_state["total_copied"] += 1
+                return True, f"✅ <b>GERÇEK İŞLEM AÇILDI</b>\n{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'} @ ${price:.4f}\n💵 ${copy_amount:.2f} USDC"
+            except Exception as e:
+                return False, f"İşlem hatası: {e}"
+        else:
+            bot_state["total_copied"] += 1
+            return True, f"⚡️ <b>KOPYA TESPİT EDİLDİ</b>\n{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'} @ ${price:.4f}\n💵 ${copy_amount:.2f} USDC\n⚠️ Manuel onayla"
     except Exception as e:
         return False, f"Hata: {e}"
 
@@ -124,19 +134,9 @@ async def fallback_polling(app):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_state["chat_id"] = update.effective_chat.id
-    keyboard = [
-        [InlineKeyboardButton("▶️ Başlat", callback_data="start_bot"),
-         InlineKeyboardButton("⏹ Durdur", callback_data="stop_bot")],
-        [InlineKeyboardButton("📊 Durum", callback_data="status"),
-         InlineKeyboardButton("💼 Pozisyon", callback_data="positions")],
-    ]
-    await update.message.reply_text(
-        f"⚡️ *Polymarket Copy Trade Bot*\n\n"
-        f"İzlenen: `{bot_state['tracked'][:10]}...`\n"
-        f"Kopya: %{bot_state['copy_pct']} | Max: ${bot_state['max_bet']} USDC",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    keyboard = [[InlineKeyboardButton("▶️ Başlat", callback_data="start_bot"), InlineKeyboardButton("⏹ Durdur", callback_data="stop_bot")], [InlineKeyboardButton("📊 Durum", callback_data="status"), InlineKeyboardButton("💼 Pozisyon", callback_data="positions")]]
+    clob_status = "✅ Bağlı" if clob_client else "❌ Bağlanamadı"
+    await update.message.reply_text(f"⚡️ *Polymarket Copy Trade Bot*\n\nİzlenen: `{bot_state['tracked'][:10]}...`\nKopya: %{bot_state['copy_pct']} | Max: ${bot_state['max_bet']} USDC\nAPI: {clob_status}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -150,11 +150,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⏹ Bot durduruldu.")
     elif query.data == "status":
         ws = "✅ Bağlı" if bot_state["ws_connected"] else "❌ Bağlı değil"
-        await query.edit_message_text(
-            f"📊 *Durum*\n\nBot: {'🟢 Çalışıyor' if bot_state['running'] else '🔴 Durdu'}\n"
-            f"WebSocket: {ws}\nKopyalanan: {bot_state['total_copied']}",
-            parse_mode="Markdown"
-        )
+        clob_status = "✅ Aktif" if clob_client else "❌ Bağlanamadı"
+        await query.edit_message_text(f"📊 *Durum*\n\nBot: {'🟢 Çalışıyor' if bot_state['running'] else '🔴 Durdu'}\nWebSocket: {ws}\nAPI: {clob_status}\nKopyalanan: {bot_state['total_copied']}", parse_mode="Markdown")
     elif query.data == "positions":
         positions = get_trader_positions(bot_state["tracked"])
         if not positions:
