@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
+from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, BUY, SELL
 
 load_dotenv()
 
@@ -44,26 +44,23 @@ def execute_copy_trade(trade):
             return False, ""
         bot_state["seen_trades"].add(trade_id)
         outcome = trade.get("side", "BUY").upper()
-        price = float(trade.get("price", 0))
         token_id = trade.get("asset", "")
         title = trade.get("title", "")[:40]
         if not token_id:
             return False, "⚠️ Token ID yok"
         if clob_client:
             try:
-                order_args = {
-    "token_id": token_id,
-    "price": price,
-    "size": 7.0,
-    "side": outcome,
-}
-resp = clob_client.create_market_order(order_args)
-
-
+                side = BUY if outcome == "BUY" else SELL
+                order = clob_client.create_market_order(MarketOrderArgs(
+                    token_id=token_id,
+                    amount=7.0,
+                    side=side,
+                ))
+                resp = clob_client.post_order(order)
                 bot_state["total_copied"] += 1
                 return True, (
                     f"✅ <b>İŞLEM KOPYALANDI</b>\n"
-                    f"{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'} @ ${price:.4f}\n"
+                    f"{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'}\n"
                     f"💵 $7.00 USDC\n"
                     f"📊 {title}"
                 )
