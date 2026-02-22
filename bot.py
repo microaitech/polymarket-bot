@@ -21,8 +21,6 @@ POLY_API_KEY    = os.getenv("POLY_API_KEY")
 POLY_SECRET     = os.getenv("POLY_SECRET")
 POLY_PASSPHRASE = os.getenv("POLY_PASSPHRASE")
 
-POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
-
 try:
     creds = ApiCreds(api_key=POLY_API_KEY, api_secret=POLY_SECRET, api_passphrase=POLY_PASSPHRASE)
     clob_client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_id=137, creds=creds)
@@ -41,15 +39,16 @@ bot_state = {
 
 def execute_copy_trade(trade):
     try:
-        trade_id = trade.get("id", "") or trade.get("transactionHash", "")
+        trade_id = trade.get("transactionHash", "")
         if not trade_id or trade_id in bot_state["seen_trades"]:
             return False, ""
         bot_state["seen_trades"].add(trade_id)
         outcome = trade.get("side", "BUY").upper()
         price = float(trade.get("price", 0))
-        token_id = trade.get("asset_id") or trade.get("tokenId", "")
+        token_id = trade.get("asset", "")
+        title = trade.get("title", "")[:40]
         if not token_id:
-            return False, f"⚠️ Token ID yok: {str(trade)[:200]}"
+            return False, "⚠️ Token ID yok"
         if clob_client:
             try:
                 from py_clob_client.clob_types import CreateOrderOptions, OrderType
@@ -61,7 +60,8 @@ def execute_copy_trade(trade):
                 return True, (
                     f"✅ <b>İŞLEM KOPYALANDI</b>\n"
                     f"{'🟢 AL' if outcome == 'BUY' else '🔴 SAT'} @ ${price:.4f}\n"
-                    f"💵 $7.00 USDC"
+                    f"💵 $7.00 USDC\n"
+                    f"📊 {title}"
                 )
             except Exception as e:
                 return False, f"⚠️ İşlem hatası: {e}"
@@ -73,25 +73,27 @@ async def polling_loop(app):
     last_seen = set()
     start_time = time.time()
     while True:
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         if not bot_state["running"]:
             continue
         try:
-            url = f"{POLYMARKET_GAMMA_API}/trades?maker={bot_state['tracked']}&limit=20&status=MATCHED"
+            url = f"https://data-api.polymarket.com/trades?user={bot_state['tracked']}&limit=20"
             r = requests.get(url, timeout=8)
-            trades = r.json().get("trades", [])
+            trades = r.json()
+            if not isinstance(trades, list):
+                continue
             for trade in trades:
-                tid = trade.get("id", "") or trade.get("transactionHash", "")
+                tid = trade.get("transactionHash", "")
                 if not tid or tid in last_seen:
                     continue
                 last_seen.add(tid)
-                created = trade.get("createdAt", 0)
+                created = trade.get("timestamp", 0)
                 if isinstance(created, (int, float)) and created < start_time:
                     continue
                 if bot_state["chat_id"]:
                     await app.bot.send_message(
                         chat_id=bot_state["chat_id"],
-                        text=f"🔍 Yeni trade:\n{str(trade)[:400]}"
+                        text=f"🔍 Yeni trade: {trade.get('title', '')} | {trade.get('side', '')} @ {trade.get('price', '')}"
                     )
                 success, message = execute_copy_trade(trade)
                 if message and bot_state["chat_id"]:
@@ -149,5 +151,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.run_polling(drop_pending_updates=True)
+
 if __name__ == "__main__":
     main()
