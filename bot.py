@@ -2,9 +2,6 @@ import os
 import asyncio
 import logging
 import time
-import hmac
-import hashlib
-import json
 import requests
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,6 +18,9 @@ POLY_API_KEY    = os.getenv("POLY_API_KEY")
 POLY_SECRET     = os.getenv("POLY_SECRET")
 POLY_PASSPHRASE = os.getenv("POLY_PASSPHRASE")
 PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
+PROXY           = os.getenv("HTTPS_PROXY")
+
+proxies = {"http": PROXY, "https": PROXY} if PROXY else None
 
 bot_state = {
     "running": False,
@@ -30,24 +30,10 @@ bot_state = {
     "total_copied": 0,
 }
 
-def get_auth_headers(method, path, body=""):
-    timestamp = str(int(time.time()))
-    message = timestamp + method + path + body
-    signature = hmac.new(
-        POLY_SECRET.encode("utf-8"),
-        message.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    return {
-        "POLY-API-KEY": POLY_API_KEY,
-        "POLY-SIGNATURE": signature,
-        "POLY-TIMESTAMP": timestamp,
-        "POLY-PASSPHRASE": POLY_PASSPHRASE,
-        "Content-Type": "application/json",
-    }
-
-path = "/orders"
+def place_order(token_id, side, amount):
     try:
+        import hmac, hashlib, json
+        timestamp = str(int(time.time()))
         path = "/order"
         body = json.dumps({
             "tokenID": token_id,
@@ -55,12 +41,25 @@ path = "/orders"
             "type": "MARKET",
             "amount": str(amount),
         })
-        headers = get_auth_headers("POST", path, body)
+        message = timestamp + "POST" + path + body
+        signature = hmac.new(
+            POLY_SECRET.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        headers = {
+            "POLY-API-KEY": POLY_API_KEY,
+            "POLY-SIGNATURE": signature,
+            "POLY-TIMESTAMP": timestamp,
+            "POLY-PASSPHRASE": POLY_PASSPHRASE,
+            "Content-Type": "application/json",
+        }
         r = requests.post(
             f"https://clob.polymarket.com{path}",
             headers=headers,
             data=body,
-            timeout=10
+            timeout=10,
+            proxies=proxies
         )
         return r.status_code == 200, r.json()
     except Exception as e:
@@ -78,7 +77,7 @@ def execute_copy_trade(trade):
         price = trade.get("price", 0)
         if not token_id:
             return False, "⚠️ Token ID yok"
-        success, resp = place_market_order(token_id, outcome, 7.0)
+        success, resp = place_order(token_id, outcome, 7.0)
         if success:
             bot_state["total_copied"] += 1
             return True, (
@@ -88,7 +87,7 @@ def execute_copy_trade(trade):
                 f"📊 {title}"
             )
         else:
-            return False, f"⚠️ Hata: {str(resp)[:100]}"
+            return False, f"⚠️ Hata: {str(resp)[:150]}"
     except Exception as e:
         return False, f"Hata: {e}"
 
@@ -101,7 +100,7 @@ async def polling_loop(app):
             continue
         try:
             url = f"https://data-api.polymarket.com/trades?user={bot_state['tracked']}&limit=20"
-            r = requests.get(url, timeout=8)
+            r = requests.get(url, timeout=8, proxies=proxies)
             trades = r.json()
             if not isinstance(trades, list):
                 continue
@@ -135,10 +134,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("⏹ Durdur", callback_data="stop_bot")],
         [InlineKeyboardButton("📊 Durum", callback_data="status")],
     ]
+    proxy_status = "✅ Aktif" if PROXY else "❌ Yok"
     await update.message.reply_text(
         f"⚡️ *Polymarket Copy Trade Bot*\n\n"
         f"İzlenen: `{bot_state['tracked'][:10]}...`\n"
-        f"Sabit işlem: $7.00 USDC",
+        f"Sabit işlem: $7.00 USDC\n"
+        f"Proxy: {proxy_status}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -157,6 +158,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"📊 *Durum*\n\n"
             f"Bot: {'🟢 Çalışıyor' if bot_state['running'] else '🔴 Durdu'}\n"
+            f"Proxy: {'✅' if PROXY else '❌'}\n"
             f"Kopyalanan: {bot_state['total_copied']}",
             parse_mode="Markdown"
         )
