@@ -47,8 +47,7 @@ bot_state = {
 }
 
 def calculate_copy_amount(original):
-    return min(original * (bot_state["copy_pct"] / 100), bot_state["max_bet"])
-
+    return 7.0
 def execute_copy_trade(trade):
     try:
         trade_id = trade.get("id", "") or trade.get("transactionHash", "")
