@@ -106,6 +106,13 @@ async def polling_loop(app):
                 created = trade.get("createdAt", 0)
                 if isinstance(created, (int, float)) and created < start_time:
                     continue
+                    if bot_state["chat_id"]:
+    await app.bot.send_message(
+        chat_id=bot_state["chat_id"],
+        text=f"🔍 Trade görüldü:\n{str(trade)[:500]}",
+        parse_mode=None
+    )
+
                 success, message = execute_copy_trade(trade)
                 if success and message and bot_state["chat_id"]:
                     await app.bot.send_message(
